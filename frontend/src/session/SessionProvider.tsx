@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { updateRetention, type RetentionRecord } from "../game/engine";
+import { updateSM2, type SM2Rating, type SM2Record } from "../game/sm2";
 import {
   SessionContext,
   emptyStats,
@@ -12,7 +13,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const startedAtRef = useRef(Date.now());
   const [stats, setStats] = useState(() => emptyStats(startedAtRef.current));
   const [retention, setRetention] = useState<Map<string, RetentionRecord>>(() => new Map());
+  const [sm2Records, setSm2Records] = useState<Map<string, SM2Record>>(() => new Map());
   const [epoch, setEpoch] = useState(0);
+
+  const updateSM2Internal = useCallback((entryId: string, rating: SM2Rating) => {
+    const now = Date.now();
+    setSm2Records((prev) => {
+      const next = new Map(prev);
+      const current = next.get(entryId);
+      next.set(entryId, updateSM2(current, rating, now));
+      return next;
+    });
+  }, []);
 
   const recordEntryResult = useCallback(
     (entryId: string, outcome: boolean | "exact" | "typo" | "incorrect") => {
@@ -26,6 +38,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [],
   );
 
+  const recordSM2Assessment = useCallback(
+    (entryId: string, rating: SM2Rating) => {
+      updateSM2Internal(entryId, rating);
+
+      // Tally in session stats
+      const isKnown = rating === "good" || rating === "easy";
+      setStats((prev) => ({
+        ...prev,
+        flashcards: {
+          known: prev.flashcards.known + (isKnown ? 1 : 0),
+          needsPractice: prev.flashcards.needsPractice + (isKnown ? 0 : 1),
+        },
+      }));
+
+      // Map to Leitner outcome for backward compatibility
+      const leitnerOutcome =
+        rating === "again" ? false : rating === "hard" ? "typo" : "exact";
+      recordEntryResult(entryId, leitnerOutcome);
+    },
+    [recordEntryResult, updateSM2Internal],
+  );
+
   const recordFlashcardAssessment = useCallback(
     (assessment: "known" | "needsPractice", entryId?: string) => {
       setStats((prev) => ({
@@ -37,9 +71,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }));
       if (entryId) {
         recordEntryResult(entryId, assessment === "known");
+        updateSM2Internal(entryId, assessment === "known" ? "good" : "again");
       }
     },
-    [recordEntryResult],
+    [recordEntryResult, updateSM2Internal],
   );
 
   const recordQuizAnswer = useCallback(
@@ -53,9 +88,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }));
       if (entryId) {
         recordEntryResult(entryId, correct);
+        updateSM2Internal(entryId, correct ? "good" : "again");
       }
     },
-    [recordEntryResult],
+    [recordEntryResult, updateSM2Internal],
   );
 
   const recordTypingAttempt = useCallback(
@@ -77,9 +113,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }));
       if (entryId) {
         recordEntryResult(entryId, resolvedOutcome);
+        const sm2Rating: SM2Rating = isExact ? "good" : isTypo ? "hard" : "again";
+        updateSM2Internal(entryId, sm2Rating);
       }
     },
-    [recordEntryResult],
+    [recordEntryResult, updateSM2Internal],
   );
 
   const recordMatchAttempt = useCallback((correct: boolean) => {
@@ -96,6 +134,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     startedAtRef.current = Date.now();
     setStats(emptyStats(startedAtRef.current));
     setRetention(new Map());
+    setSm2Records(new Map());
     setEpoch((value) => value + 1); // remount the active mode so the round restarts
   }, []);
 
@@ -103,9 +142,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     () => ({
       stats,
       retention,
+      sm2Records,
       isPristine: isPristineStats(stats),
       epoch,
       recordFlashcardAssessment,
+      recordSM2Assessment,
       recordQuizAnswer,
       recordTypingAttempt,
       recordMatchAttempt,
@@ -115,8 +156,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [
       stats,
       retention,
+      sm2Records,
       epoch,
       recordFlashcardAssessment,
+      recordSM2Assessment,
       recordQuizAnswer,
       recordTypingAttempt,
       recordMatchAttempt,

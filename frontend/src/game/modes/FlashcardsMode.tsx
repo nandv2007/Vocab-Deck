@@ -5,6 +5,13 @@ import {
   buildFlashcardOrder,
   buildMistakeReviewOrder,
 } from "../engine";
+import {
+  buildSM2StudyOrder,
+  formatInterval,
+  predictRetention,
+  previewNextIntervals,
+  type SM2Rating,
+} from "../sm2";
 import { parseBoundedCount } from "../roundSize";
 import { useSessionSeed } from "../useSessionSeed";
 import { rise, useAnimationRegistry } from "../../lib/motion";
@@ -27,19 +34,23 @@ export const MAX_ROUND = 50;
  * and targeted review of missed words.
  */
 export function FlashcardsMode({ deck, seed }: { deck: PlayableDeck; seed?: number }) {
-  const { recordFlashcardAssessment, retention } = useSession();
+  const { recordFlashcardAssessment, recordSM2Assessment, retention, sm2Records } = useSession();
   const register = useAnimationRegistry();
   const { rng, reshuffle } = useSessionSeed(seed);
   const [useAdaptive, setUseAdaptive] = useState(false);
+  const [ratingMode, setRatingMode] = useState<"classic" | "sm2">("classic");
   const [reviewQueue, setReviewQueue] = useState<VocabularyEntry[] | null>(null);
 
   const fullOrder = useMemo(() => {
     if (useAdaptive) {
+      if (ratingMode === "sm2") {
+        return buildSM2StudyOrder(deck.entries, sm2Records, rng);
+      }
       return buildAdaptiveFlashcardOrder(deck.entries, retention, rng);
     }
     return buildFlashcardOrder(deck.entries, rng);
     // Stable order during a round; reshuffle() rebuilds when starting a new round or changing size
-  }, [deck.entries, rng, useAdaptive]);
+  }, [deck.entries, rng, useAdaptive, ratingMode]);
 
   const [roundSize, setRoundSize] = useState(() => Math.min(fullOrder.length, MAX_ROUND));
   const [sizeInput, setSizeInput] = useState(() => String(Math.min(fullOrder.length, MAX_ROUND)));
@@ -135,7 +146,25 @@ export function FlashcardsMode({ deck, seed }: { deck: PlayableDeck; seed?: numb
     [advance, index, order, recordFlashcardAssessment],
   );
 
-  // Keyboard navigation: Space/Enter reveals, 1/Left = needsPractice, 2/Right = known
+  const assessSM2 = useCallback(
+    (rating: SM2Rating) => {
+      const currentEntry = order[index];
+      if (currentEntry) {
+        recordSM2Assessment(currentEntry.id, rating);
+        const legacyAssessment = rating === "again" ? "needsPractice" : "known";
+        setRoundAssessments((prev) => {
+          const next = new Map(prev);
+          next.set(currentEntry.id, { entry: currentEntry, assessment: legacyAssessment });
+          return next;
+        });
+      }
+      advance();
+    },
+    [advance, index, order, recordSM2Assessment],
+  );
+
+  // Keyboard navigation: Space/Enter reveals; in classic mode: 1/Left = needsPractice, 2/Right = known;
+  // in SM-2 mode: 1 = again, 2 = hard, 3 = good, 4 = easy
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (finished) return;
@@ -154,19 +183,35 @@ export function FlashcardsMode({ deck, seed }: { deck: PlayableDeck; seed?: numb
           setRevealed(true);
         }
       } else {
-        if (event.key === "1" || event.key === "ArrowLeft") {
-          event.preventDefault();
-          assess("needsPractice");
-        } else if (event.key === "2" || event.key === "ArrowRight") {
-          event.preventDefault();
-          assess("known");
+        if (ratingMode === "sm2") {
+          if (event.key === "1" || event.key === "ArrowLeft") {
+            event.preventDefault();
+            assessSM2("again");
+          } else if (event.key === "2") {
+            event.preventDefault();
+            assessSM2("hard");
+          } else if (event.key === "3" || event.key === "ArrowRight") {
+            event.preventDefault();
+            assessSM2("good");
+          } else if (event.key === "4") {
+            event.preventDefault();
+            assessSM2("easy");
+          }
+        } else {
+          if (event.key === "1" || event.key === "ArrowLeft") {
+            event.preventDefault();
+            assess("needsPractice");
+          } else if (event.key === "2" || event.key === "ArrowRight") {
+            event.preventDefault();
+            assess("known");
+          }
         }
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [assess, clearTimer, finished, revealed]);
+  }, [assess, assessSM2, clearTimer, finished, ratingMode, revealed]);
 
   const restart = useCallback(() => {
     clearTimer();
@@ -192,6 +237,25 @@ export function FlashcardsMode({ deck, seed }: { deck: PlayableDeck; seed?: numb
     [roundAssessments],
   );
 
+  const sm2Summary = useMemo(() => {
+    let totalRet = 0;
+    let reviewedCount = 0;
+    let dueSoon = 0;
+    let mastered = 0;
+    for (const e of deck.entries) {
+      const rec = sm2Records.get(e.id);
+      if (rec && rec.totalReviews > 0) {
+        reviewedCount += 1;
+        const ret = predictRetention(rec);
+        totalRet += ret;
+        if (rec.interval <= 1 || ret < 0.9) dueSoon += 1;
+        if (rec.repetition >= 2 && rec.interval >= 6) mastered += 1;
+      }
+    }
+    const avgRetention = reviewedCount > 0 ? Math.round((totalRet / reviewedCount) * 100) : 100;
+    return { avgRetention, dueSoon, mastered, reviewedCount };
+  }, [deck.entries, sm2Records]);
+
   const startMistakeReview = useCallback(() => {
     if (missedEntries.length === 0) return;
     clearTimer();
@@ -212,6 +276,24 @@ export function FlashcardsMode({ deck, seed }: { deck: PlayableDeck; seed?: numb
             You reviewed all {order.length} cards: {knownCount} marked known
             {missedEntries.length > 0 ? `, ${missedEntries.length} needing practice` : ""}.
           </p>
+
+          <div className="sm2-retention-panel stack-tight">
+            <span className="label">SuperMemo SM-2 & Forgetting Curve Memory Stability</span>
+            <div className="review-stats-grid">
+              <div className="review-stat-card">
+                <span className="label">Retention Rate</span>
+                <div className="review-stat-count">{sm2Summary.avgRetention}%</div>
+              </div>
+              <div className="review-stat-card">
+                <span className="label">Due Soon</span>
+                <div className="review-stat-count">{sm2Summary.dueSoon}</div>
+              </div>
+              <div className="review-stat-card">
+                <span className="label">Mastered</span>
+                <div className="review-stat-count">{sm2Summary.mastered}</div>
+              </div>
+            </div>
+          </div>
 
           {missedEntries.length > 0 ? (
             <div className="stack-tight mistake-section">
@@ -254,6 +336,8 @@ export function FlashcardsMode({ deck, seed }: { deck: PlayableDeck; seed?: numb
   }
 
   const entry = order[index];
+  const currentSM2Record = entry ? sm2Records.get(entry.id) : undefined;
+  const intervalPreviews = previewNextIntervals(currentSM2Record);
 
   return (
     <div className="stack">
@@ -276,6 +360,16 @@ export function FlashcardsMode({ deck, seed }: { deck: PlayableDeck; seed?: numb
               title="Prioritize low-retention vocabulary using Leitner spaced repetition"
             >
               {useAdaptive ? "Spaced Repetition" : "Random Order"}
+            </button>
+          ) : null}
+          {!reviewQueue ? (
+            <button
+              type="button"
+              className={`mode-order-button sm2-rating-toggle${ratingMode === "sm2" ? " is-active" : ""}`}
+              onClick={() => setRatingMode((prev) => (prev === "classic" ? "sm2" : "classic"))}
+              title="Toggle between Classic (2-button) and SuperMemo SM-2 (4-button) assessment"
+            >
+              {ratingMode === "sm2" ? "Rating: SM-2" : "Rating: Classic"}
             </button>
           ) : null}
           {!reviewQueue ? (
@@ -327,18 +421,55 @@ export function FlashcardsMode({ deck, seed }: { deck: PlayableDeck; seed?: numb
       </Panel>
 
       {revealed ? (
-        <div className="row flashcard-actions">
-          <Button variant="primary" onClick={() => assess("known")} title="Press 2 or Arrow Right">
-            Known <span aria-hidden="true" className="kbd-hint">[2]</span>
-          </Button>
-          <Button
-            variant="danger-outline"
-            onClick={() => assess("needsPractice")}
-            title="Press 1 or Arrow Left"
-          >
-            Needs practice <span aria-hidden="true" className="kbd-hint">[1]</span>
-          </Button>
-        </div>
+        ratingMode === "sm2" ? (
+          <div className="row flashcard-actions sm2-actions">
+            <Button
+              variant="danger-outline"
+              onClick={() => assessSM2("again")}
+              title="Press 1 or Arrow Left"
+            >
+              Again <span className="sm2-interval-badge">({formatInterval(intervalPreviews.again)})</span>{" "}
+              <span aria-hidden="true" className="kbd-hint">[1]</span>
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => assessSM2("hard")}
+              title="Press 2"
+            >
+              Hard <span className="sm2-interval-badge">({formatInterval(intervalPreviews.hard)})</span>{" "}
+              <span aria-hidden="true" className="kbd-hint">[2]</span>
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => assessSM2("good")}
+              title="Press 3 or Arrow Right"
+            >
+              Good <span className="sm2-interval-badge">({formatInterval(intervalPreviews.good)})</span>{" "}
+              <span aria-hidden="true" className="kbd-hint">[3]</span>
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => assessSM2("easy")}
+              title="Press 4"
+            >
+              Easy <span className="sm2-interval-badge">({formatInterval(intervalPreviews.easy)})</span>{" "}
+              <span aria-hidden="true" className="kbd-hint">[4]</span>
+            </Button>
+          </div>
+        ) : (
+          <div className="row flashcard-actions">
+            <Button variant="primary" onClick={() => assess("known")} title="Press 2 or Arrow Right">
+              Known <span aria-hidden="true" className="kbd-hint">[2]</span>
+            </Button>
+            <Button
+              variant="danger-outline"
+              onClick={() => assess("needsPractice")}
+              title="Press 1 or Arrow Left"
+            >
+              Needs practice <span aria-hidden="true" className="kbd-hint">[1]</span>
+            </Button>
+          </div>
+        )
       ) : (
         <Button
           variant="primary"

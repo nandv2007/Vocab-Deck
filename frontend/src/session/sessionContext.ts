@@ -9,6 +9,7 @@
 
 import { createContext } from "react";
 import type { RetentionRecord } from "../game/engine";
+import type { SM2Rating, SM2Record } from "../game/sm2";
 
 export interface FlashcardTally {
   known: number;
@@ -67,11 +68,14 @@ export interface SessionApi {
   stats: SessionStats;
   /** In-memory Leitner retention tracking per entry. */
   retention: ReadonlyMap<string, RetentionRecord>;
+  /** In-memory SuperMemo SM-2 memory retention records per entry. */
+  sm2Records: ReadonlyMap<string, SM2Record>;
   /** True until the first recorded event, so the UI can show a quiet zero state. */
   isPristine: boolean;
   /** Increments on every restart; use it to remount the active round. */
   epoch: number;
   recordFlashcardAssessment: (assessment: FlashcardAssessment, entryId?: string) => void;
+  recordSM2Assessment: (entryId: string, rating: SM2Rating) => void;
   recordQuizAnswer: (correct: boolean, entryId?: string) => void;
   recordTypingAttempt: (correct: boolean, entryId?: string, outcome?: "exact" | "typo" | "incorrect") => void;
   recordMatchAttempt: (correct: boolean) => void;

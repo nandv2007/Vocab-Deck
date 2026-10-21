@@ -2016,3 +2016,29 @@ select:focus {
   font-family: var(--font-display, inherit);
 }
 
+/* --- SuperMemo SM-2 Spaced Repetition --- */
+.sm2-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.sm2-interval-badge {
+  font-size: 0.8em;
+  opacity: 0.85;
+  font-weight: 400;
+}
+
+.sm2-rating-toggle {
+  font-size: 0.85rem;
+  padding: 0.3rem 0.6rem;
+}
+
+.sm2-retention-panel {
+  border: 1px solid var(--border);
+  padding: var(--space-3);
+  background: var(--paper-sunken);
+  margin-top: var(--space-2);
+}
+
+
